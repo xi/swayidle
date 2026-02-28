@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -15,6 +16,7 @@
 #include <wordexp.h>
 #include "config.h"
 #include "ext-idle-notify-v1-client-protocol.h"
+#include "ext-socket-manager-unstable-v1-client-protocol.h"
 #include "log.h"
 #if HAVE_SYSTEMD
 #include <systemd/sd-bus.h>
@@ -25,6 +27,7 @@
 #endif
 
 static struct ext_idle_notifier_v1 *idle_notifier = NULL;
+static struct ext_socket_manager_v1 *socket_manager = NULL;
 static struct wl_seat *seat = NULL;
 
 struct swayidle_state {
@@ -138,10 +141,34 @@ void sway_terminate(int exit_code) {
 	exit(exit_code);
 }
 
+static void create_socket(void) {
+	int sv[2];
+
+	if (socket_manager == NULL) {
+		swayidle_log(LOG_DEBUG, "Compositor doesn't support socket manager protocol");
+		return;
+	}
+
+	if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) {
+		swayidle_log(LOG_ERROR, "socketpair failed");
+		return;
+	}
+
+	ext_socket_manager_v1_register_socket(socket_manager, sv[0]);
+	wl_display_roundtrip(state.display);
+	close(sv[0]);
+
+	char socket_str[16];
+	snprintf(socket_str, sizeof(socket_str), "%d", sv[1]);
+	setenv("WAYLAND_SOCKET", socket_str, 1);
+}
+
 static void cmd_exec(char *param) {
 	swayidle_log(LOG_DEBUG, "Cmd exec %s", param);
 	pid_t pid = fork();
 	if (pid == 0) {
+		create_socket();
+
 		if (!state.wait) {
 			pid = fork();
 		}
@@ -544,6 +571,9 @@ static void handle_global(void *data, struct wl_registry *registry,
 	if (strcmp(interface, ext_idle_notifier_v1_interface.name) == 0) {
 		idle_notifier =
 			wl_registry_bind(registry, name, &ext_idle_notifier_v1_interface, 1);
+	} else if (strcmp(interface, ext_socket_manager_v1_interface.name) == 0) {
+		socket_manager =
+			wl_registry_bind(registry, name, &ext_socket_manager_v1_interface, 1);
 	} else if (strcmp(interface, wl_seat_interface.name) == 0) {
 		struct seat *s = calloc(1, sizeof(struct seat));
 		s->proxy = wl_registry_bind(registry, name, &wl_seat_interface, 2);
